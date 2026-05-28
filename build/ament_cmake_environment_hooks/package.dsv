@@ -1,0 +1,4 @@
+source;share/rl_deploy/local_setup.bash
+source;share/rl_deploy/local_setup.dsv
+source;share/rl_deploy/local_setup.sh
+source;share/rl_deploy/local_setup.zsh

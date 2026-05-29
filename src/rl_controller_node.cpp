@@ -177,6 +177,7 @@ void RLControllerNode::timerCallback() {
   // --- build observation ---
   auto obs = _converter.buildObservation(
       base_ang_vel, imu_quat,
+      _latest_joint_state.name,
       _latest_joint_state.position,
       _latest_joint_state.velocity);
 

@@ -62,22 +62,24 @@ private:
 // Config for BeyondMimic data pipeline
 // ---------------------------------------------------------------------------
 struct BeyondMimicConfig {
-  // --- model joint order (from ONNX metadata) ---
-  std::vector<std::string> joint_names;       // model policy joint order
-  std::vector<float> default_dof_pos;         // in model order
-  std::vector<float> kp;                      // in model order
-  std::vector<float> kd;                      // in model order
-  std::vector<float> action_scales;           // in model order
+  // --- model joint metadata (from ONNX, RoboJuDo convention, model-native order) ---
+  std::vector<std::string> joint_names;
+  std::vector<float> default_dof_pos;
+  std::vector<float> kp;
+  std::vector<float> kd;
+  std::vector<float> action_scales;
 
-  // --- robot joint order (from ROS2 /motion/joint_state) ---
-  // If empty, assumed same as model joint_names order (1:1 index mapping).
-  // If set, DoFAdapter remaps robot↔model using joint_name_map.
+  // --- joints this controller manages (RoboJuDo convention, Casbot_25DoF order) ---
+  // These are the names used throughout the pipeline internally.
+  // They match model joint_names for arms/head/waist; for legs they use
+  // RoboJuDo descriptive names (left_leg_pelvic_pitch_joint not leg_l1_joint).
+  // If empty, assumes 1:1 with model joint_names.
   std::vector<std::string> robot_joint_names;
 
-  // --- explicit name mapping: ros2_name → model_name ---
-  // E.g. {"leg_l1_joint": "left_leg_pelvic_pitch_joint"}
-  // If a name is in robot_joint_names but NOT in this map, same-name
-  // matching is attempted as fallback.
+  // --- hl_motion wire name → RoboJuDo model name (leg joints only) ---
+  // /motion/joint_state publishes "leg_l1_joint", but the model uses
+  // "left_leg_pelvic_pitch_joint". This map bridges the two.
+  // Arms/head/waist use the same names in both systems so need no entry.
   std::map<std::string, std::string> joint_name_map;
 
   // --- motion handling ---
@@ -159,11 +161,15 @@ public:
                          const BeyondMimicConfig &model_meta = {});
 
   /// Build observation matching RoboJuDo BeyondMimic format.
-  /// dof_pos / dof_vel are in ROBOT joint order; they are remapped to model
-  /// order internally via DoFAdapter.
+  /// joint_names / dof_pos / dof_vel come from /motion/joint_state
+  /// (hl_motion wire names, variable count).  Internally extracts the
+  /// 25 controlled joints via name-based matching (translating hl_motion
+  /// wire names → RoboJuDo via joint_name_map), then reorders to model
+  /// layout via _robot2model.
   std::vector<float> buildObservation(
       const Eigen::Vector3f &base_ang_vel,
       const Eigen::Quaternionf &imu_quat,
+      const std::vector<std::string> &joint_names,
       const std::vector<double> &dof_pos,
       const std::vector<double> &dof_vel);
 
@@ -197,7 +203,14 @@ private:
   std::vector<float> _last_action;
   TransformAlignment _init_align;
 
-  // Joint mapping: robot order ↔ model (policy) order
-  DoFAdapter _robot2model;   // robot dof_pos → model observation order
-  DoFAdapter _model2robot;   // model action → robot pd_target order
+  // reorder between the two joint orders (both RoboJuDo convention):
+  //   robot_joint_names (Casbot_25DoF, grouped by body part)
+  // ↔ model joint_names (model-native, interleaved left/right pairs)
+  DoFAdapter _robot2model;
+  DoFAdapter _model2robot;
+
+  // reverse lookup: RoboJuDo model name → hl_motion wire name
+  // built from joint_name_map. E.g. "left_leg_pelvic_pitch_joint" → "leg_l1_joint"
+  // used when reading /motion/joint_state and writing /motion/joint_cmd
+  std::map<std::string, std::string> _model_to_ros2_names;
 };

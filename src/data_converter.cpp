@@ -139,23 +139,26 @@ void DataConverter::configure(const BeyondMimicConfig &cfg) {
   _last_action.assign(cfg.numDof(), 0.0f);
 
   // Build DoFAdapters
-  const auto &robot_names = _cfg.robot_joint_names.empty()
-                                ? _cfg.joint_names
-                                : _cfg.robot_joint_names;
+  const auto &controlled_names = _cfg.robot_joint_names.empty()
+                                      ? _cfg.joint_names
+                                      : _cfg.robot_joint_names;
 
   if (_cfg.robot_joint_names.empty()) {
     std::cout << "[DataConverter] No robot_joint_names set, assuming 1:1 "
               << "mapping to model joint order (" << _cfg.numDof() << " DOF)"
               << std::endl;
   } else {
-    _robot2model.build(robot_names, _cfg.joint_names, _cfg.joint_name_map);
+    // Both controlled_names and _cfg.joint_names use RoboJuDo convention.
+    // DoFAdapter handles the order difference (Casbot_25DoF ↔ model-native)
+    // via same-name matching. joint_name_map is NOT needed here — it's for
+    // hl_motion wire name translation in buildObservation/actionToJointCmd.
+    _robot2model.build(controlled_names, _cfg.joint_names, {});
+    _model2robot.build(_cfg.joint_names, controlled_names, {});
 
-    // Build reverse mapping for model→robot direction
-    std::map<std::string, std::string> reverse_map;
-    for (const auto &[ros2_name, model_name] : _cfg.joint_name_map) {
-      reverse_map[model_name] = ros2_name;
+    // Build reverse map: RoboJuDo → hl_motion wire name (for leg joints)
+    for (const auto &[wire_name, model_name] : _cfg.joint_name_map) {
+      _model_to_ros2_names[model_name] = wire_name;
     }
-    _model2robot.build(_cfg.joint_names, robot_names, reverse_map);
   }
 }
 
@@ -254,26 +257,61 @@ void DataConverter::configureFromYaml(const std::string &yaml_path,
 
 // ---------------------------------------------------------------------------
 // Build observation (BeyondMimic format)
-// Input dof_pos/dof_vel are in ROBOT order → remapped to MODEL order via
-// _robot2model.
+//
+// joint_names / dof_pos / dof_vel are raw data from /motion/joint_state
+// (hl_motion wire names).  We extract the 25 controlled joints by matching
+// names: first translate hl_motion wire name → RoboJuDo (via joint_name_map
+// for legs, identity for arms/head/waist), then find it in controlled_names.
+// Result is in Casbot_25DoF order (controlled_names), then DoFAdapter remaps
+// to model-native order.
 // ---------------------------------------------------------------------------
 std::vector<float> DataConverter::buildObservation(
     const Eigen::Vector3f &base_ang_vel,
     const Eigen::Quaternionf &imu_quat,
+    const std::vector<std::string> &joint_names,
     const std::vector<double> &dof_pos,
     const std::vector<double> &dof_vel) {
 
   int N = _cfg.numDof();
+  const auto &controlled_names = _cfg.robot_joint_names.empty()
+                                      ? _cfg.joint_names
+                                      : _cfg.robot_joint_names;
+  int num_controlled = static_cast<int>(controlled_names.size());
 
-  // Remap dof_pos / dof_vel from robot order to model policy order
-  std::vector<float> dof_pos_f(dof_pos.begin(), dof_pos.end());
-  std::vector<float> dof_vel_f(dof_vel.begin(), dof_vel.end());
+  // Extract controlled joints from incoming joint_state by name.
+  // Incoming names are hl_motion wire format (leg_l1_joint for legs,
+  // left_shoulder_pitch_joint for arms).  controlled_names are RoboJuDo
+  // convention.  Translate via _model_to_ros2_names (reverse joint_name_map)
+  // then match.
+  std::vector<float> dof_pos_ctrl(num_controlled, 0.0f);
+  std::vector<float> dof_vel_ctrl(num_controlled, 0.0f);
+  {
+    std::map<std::string, int> wire_name_to_idx;
+    for (size_t i = 0; i < joint_names.size(); i++) {
+      wire_name_to_idx[joint_names[i]] = static_cast<int>(i);
+    }
+    for (int c = 0; c < num_controlled; c++) {
+      // controlled name is RoboJuDo; translate to hl_motion wire name
+      const std::string &model_name = controlled_names[c];
+      std::string wire_name = model_name;
+      auto it = _model_to_ros2_names.find(model_name);
+      if (it != _model_to_ros2_names.end()) {
+        wire_name = it->second;  // e.g. left_leg_pelvic_pitch_joint → leg_l1_joint
+      }
+      auto idx_it = wire_name_to_idx.find(wire_name);
+      if (idx_it != wire_name_to_idx.end()) {
+        int src = idx_it->second;
+        if (src < static_cast<int>(dof_pos.size()))
+          dof_pos_ctrl[c] = static_cast<float>(dof_pos[src]);
+        if (src < static_cast<int>(dof_vel.size()))
+          dof_vel_ctrl[c] = static_cast<float>(dof_vel[src]);
+      }
+    }
+  }
 
-  std::vector<float> dof_pos_model = _robot2model.fit(dof_pos_f);
-  std::vector<float> dof_vel_model = _robot2model.fit(dof_vel_f);
-
-  // Also remap default_dof_pos from model order to match
-  // (default_dof_pos is already in model order, so no remap needed)
+  // Reorder from Casbot_25DoF order → model-native order
+  std::vector<float> dof_pos_model = _robot2model.fit(dof_pos_ctrl);
+  std::vector<float> dof_vel_model = _robot2model.fit(dof_vel_ctrl);
 
   std::vector<float> obs;
 
@@ -376,12 +414,12 @@ std::vector<float> DataConverter::processAction(const std::vector<float> &raw_ac
 }
 
 // ---------------------------------------------------------------------------
-// PD target: MODEL order → remap to ROBOT order
+// PD target: model-native order → Casbot_25DoF order
 // ---------------------------------------------------------------------------
 std::vector<float> DataConverter::computePdTarget(const std::vector<float> &scaled_action) {
   int N = _cfg.numDof();
 
-  // Compute in MODEL order
+  // Compute in model-native order
   std::vector<float> target_model(N);
 
   if (_cfg.use_residual_action && !_command.empty()) {
@@ -394,25 +432,14 @@ std::vector<float> DataConverter::computePdTarget(const std::vector<float> &scal
     }
   }
 
-  // Remap MODEL → ROBOT order for publishing
-  // Use robot_joint_names's default_dof_pos as template if available
-  const auto &robot_names = _cfg.robot_joint_names.empty()
-                                ? _cfg.joint_names
-                                : _cfg.robot_joint_names;
-
   if (_cfg.robot_joint_names.empty()) {
-    // 1:1 mapping — no remap needed
-    return target_model;
-  } else {
-    // Build template from model default_pos remapped to robot order
-    // Robot default_pos: _model2robot.fit(_, robot_dof_pos)
-    // Actually, use model2robot with empty template (zeros for unmatched joints)
-    return _model2robot.fit(target_model);
+    return target_model;  // 1:1, no reorder needed
   }
+  return _model2robot.fit(target_model);
 }
 
 // ---------------------------------------------------------------------------
-// Convert PD target (ROBOT order) → JointState message
+// Build /motion/joint_cmd message (Casbot_25DoF order → hl_motion wire names)
 // ---------------------------------------------------------------------------
 sensor_msgs::msg::JointState DataConverter::actionToJointCmd(
     const std::vector<float> &pd_target) {
@@ -420,15 +447,22 @@ sensor_msgs::msg::JointState DataConverter::actionToJointCmd(
   sensor_msgs::msg::JointState cmd;
   cmd.header.stamp = rclcpp::Clock().now();
 
-  // Use robot_joint_names for the published message header
-  const auto &pub_names = _cfg.robot_joint_names.empty()
-                              ? _cfg.joint_names
-                              : _cfg.robot_joint_names;
+  // joint names we control, in RoboJuDo convention
+  const auto &model_names = _cfg.robot_joint_names.empty()
+                                ? _cfg.joint_names
+                                : _cfg.robot_joint_names;
 
-  int N = std::min((int)pd_target.size(), (int)pub_names.size());
+  int N = std::min((int)pd_target.size(), (int)model_names.size());
 
   for (int i = 0; i < N; i++) {
-    cmd.name.push_back(pub_names[i]);
+    // Translate RoboJuDo → hl_motion wire name for the message
+    const std::string &model_name = model_names[i];
+    std::string wire_name = model_name;
+    auto it = _model_to_ros2_names.find(model_name);
+    if (it != _model_to_ros2_names.end()) {
+      wire_name = it->second;  // e.g. left_leg_pelvic_pitch_joint → leg_l1_joint
+    }
+    cmd.name.push_back(wire_name);
     cmd.position.push_back(pd_target[i]);
     cmd.velocity.push_back(0.0);
     cmd.effort.push_back(0.0);

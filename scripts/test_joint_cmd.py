@@ -41,9 +41,9 @@ PRESETS = {
         "right_elbow_pitch_joint": 0.87,
     },
     "left_hand_up": {
-        "left_shoulder_pitch_joint": 0.35,
-        "left_shoulder_roll_joint": 0.18,
-        "left_elbow_pitch_joint": 0.87,
+        "left_shoulder_pitch_joint": 0.0,
+        "left_shoulder_roll_joint": 0.0,
+        "left_elbow_pitch_joint": -1.5,  # range is [-1.8675, 0], -1.87 was outside limit
     },
     "both_hands_up": {
         "left_shoulder_pitch_joint": 0.35,
@@ -63,19 +63,43 @@ PRESETS = {
     },
 }
 
-# All 28 joints in the order hl_motion publishes /motion/joint_state
+# hl_motion 在 /motion/joint_state 上发布的所有 49 个关节名（线上格式）:
+#   腿 ×12: leg_l1_joint … leg_r6_joint（hl_motion 短命名）
+#   臂 ×14: left_shoulder_pitch_joint … right_wrist_roll_joint（描述命名）
+#   头 ×2:  head_yaw_joint, head_pitch_joint
+#   腰 ×1:  waist_yaw_joint
+#   手 ×20: left_thumb_metacarpal_joint … right_pinky_distal_joint
+# 这些名字直接用于 /motion/joint_cmd 消息中，因此必须与 hl_motion 发布的完全一致。
 ALL_JOINTS = [
+    # Legs (12) — hl_motion uses short names for legs
     "leg_l1_joint", "leg_l2_joint", "leg_l3_joint",
     "leg_l4_joint", "leg_l5_joint", "leg_l6_joint",
     "leg_r1_joint", "leg_r2_joint", "leg_r3_joint",
     "leg_r4_joint", "leg_r5_joint", "leg_r6_joint",
+    # Left arm 7DOF
     "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint",
     "left_elbow_pitch_joint", "left_wrist_yaw_joint",
     "left_wrist_pitch_joint", "left_wrist_roll_joint",
+    # Right arm 7DOF
     "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint",
     "right_elbow_pitch_joint", "right_wrist_yaw_joint",
     "right_wrist_pitch_joint", "right_wrist_roll_joint",
+    # Head (2)
     "head_yaw_joint", "head_pitch_joint",
+    # Waist (1)
+    "waist_yaw_joint",
+    # Left hand (10)
+    "left_thumb_metacarpal_joint", "left_thumb_proximal_joint",
+    "left_index_proximal_joint", "left_index_distal_joint",
+    "left_middle_proximal_joint", "left_middle_distal_joint",
+    "left_ring_proximal_joint", "left_ring_distal_joint",
+    "left_pinky_proximal_joint", "left_pinky_distal_joint",
+    # Right hand (10)
+    "right_thumb_metacarpal_joint", "right_thumb_proximal_joint",
+    "right_index_proximal_joint", "right_index_distal_joint",
+    "right_middle_proximal_joint", "right_middle_distal_joint",
+    "right_ring_proximal_joint", "right_ring_distal_joint",
+    "right_pinky_proximal_joint", "right_pinky_distal_joint",
 ]
 
 

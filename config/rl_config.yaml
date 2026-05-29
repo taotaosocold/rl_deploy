@@ -2,62 +2,65 @@
 # RL Deploy Configuration — BeyondMimic Pipeline (CASBOT02)
 # ============================================================
 #
-# 两套命名系统：
-#   ROS2 /motion/joint_state → hl_motion 实际发布名称 (28 关节)
-#   ONNX 模型元数据          → RoboJuDo 风格 (25 关节)
-#   joint_name_map           → 显式映射 ROS2名 → 模型名
+# 命名规范：robot_joint_names 使用 RoboJuDo 描述性名称，与模型一致。
+#   hl_motion 通过 /motion/joint_state 发布的数据使用短名称（leg_l1_joint），
+#   由 joint_name_map 完成 hl_motion → RoboJuDo 的转换（仅腿关节名不同）。
+#   臂/头/腰关节在两边命名相同（left_shoulder_pitch_joint 等），无需映射。
 #
-# 数据流：
-#   ROS2 joint_state (28, 实际发布顺序) → _robot2model.fit() → observation (25, model顺序)
-#   model action (25, model顺序)         → _model2robot.fit() → /motion/joint_cmd (28, 实际发布顺序)
+#   数据流：
+#     /motion/joint_state (hl_motion 名, 49 joints)
+#       → 名称转换 (joint_name_map + same-name fallback)
+#       → 匹配 robot_joint_names (RoboJuDo 名, 25 DOF)
+#       → DoFAdapter 按名映射到模型 joint 顺序
+#       → ONNX 推理
+#       → DoFAdapter 逆映射
+#       → 名称转换 (逆 joint_name_map → hl_motion 名)
+#       → /motion/joint_cmd (hl_motion 名, 25 DOF)
 #
-# 重要：/motion/joint_state 实际发布 28 关节（7DOF 手臂），但模型只有 25 DOF（5DOF 手臂）。
-#       多余的 wrist_pitch/roll 关节在模型侧无对应，PD 目标为默认值 0。
-#       waist_yaw_joint 不在发布列表中，模型侧始终为 0。
+# Casbot_25DoF（RoboJuDo env cfg 顺序，25 DOF）:
+#   左腿 6 + 右腿 6 + 躯干 3 + 左臂 5 + 右臂 5 = 25
+#   不包含 wrist_pitch、wrist_roll（模型不控制）及手部关节（20 个）
 # ============================================================
 
 model_path: "model/fallAndGetUp2_subject2_clip_inter.onnx"
 control_hz: 50
 
 # ============================================================
-# ROS2 /motion/joint_state 实际发布的关节顺序和名称
+# 模型控制的 25 个关节（RoboJuDo Casbot_25DoF 顺序 + 命名）
 # ============================================================
-# hl_motion convertJointState() 按固定索引顺序填充：
-#   腿(12) → 左臂7DOF(7) → 右臂7DOF(7) → 头(2) = 28 关节
-# 注意：waist_yaw_joint 不在发布列表中
 robot_joint_names: [
-  # 左腿 (indices 0-5)
-  leg_l1_joint, leg_l2_joint, leg_l3_joint, leg_l4_joint, leg_l5_joint, leg_l6_joint,
-  # 右腿 (indices 6-11)
-  leg_r1_joint, leg_r2_joint, leg_r3_joint, leg_r4_joint, leg_r5_joint, leg_r6_joint,
-  # 左臂 7DOF (indices 12-18) — 实际发布使用描述性名称
+  # 左腿 6DOF (indices 0-5)
+  left_leg_pelvic_pitch_joint, left_leg_pelvic_roll_joint, left_leg_pelvic_yaw_joint,
+  left_leg_knee_pitch_joint, left_leg_ankle_pitch_joint, left_leg_ankle_roll_joint,
+  # 右腿 6DOF (indices 6-11)
+  right_leg_pelvic_pitch_joint, right_leg_pelvic_roll_joint, right_leg_pelvic_yaw_joint,
+  right_leg_knee_pitch_joint, right_leg_ankle_pitch_joint, right_leg_ankle_roll_joint,
+  # 躯干 3DOF (indices 12-14)
+  waist_yaw_joint, head_yaw_joint, head_pitch_joint,
+  # 左臂 5DOF (indices 15-19)
   left_shoulder_pitch_joint, left_shoulder_roll_joint, left_shoulder_yaw_joint,
   left_elbow_pitch_joint, left_wrist_yaw_joint,
-  left_wrist_pitch_joint, left_wrist_roll_joint,
-  # 右臂 7DOF (indices 19-25)
+  # 右臂 5DOF (indices 20-24)
   right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint,
   right_elbow_pitch_joint, right_wrist_yaw_joint,
-  right_wrist_pitch_joint, right_wrist_roll_joint,
-  # 头 (indices 26-27)
-  head_yaw_joint, head_pitch_joint
 ]
 
 # ============================================================
-# 关节名显式映射: ROS2名 → ONNX模型名
+# 关节名映射: hl_motion 线上名 → RoboJuDo 模型名（仅腿关节）
 # ============================================================
-# 腿关节：hl_motion 短名称 → RoboJuDo 描述性名称，必须显式映射
-# 手臂关节：实际发布名 = 模型名，靠同名字 fallback 匹配，无需映射
-# 头关节： 实际发布名 = 模型名，靠同名字 fallback 匹配，无需映射
-# wrist_pitch/roll：模型无对应关节，不会被映射（PD 目标为默认值）
+# /motion/joint_state 发布的腿关节使用 hl_motion 短命名（leg_l1_joint），
+# 而 robot_joint_names 和模型使用 RoboJuDo 描述命名（left_leg_pelvic_pitch_joint）。
+# 此映射用于双向转换：读 joint_state 时 hl_motion→RoboJuDo，发 joint_cmd 时逆转换。
+# 臂/头/腰关节在两边命名相同，无需在此列出。
 joint_name_map:
-  # 左腿
+  # 左腿: hl_motion 短名 → RoboJuDo 描述名
   leg_l1_joint: left_leg_pelvic_pitch_joint
   leg_l2_joint: left_leg_pelvic_roll_joint
   leg_l3_joint: left_leg_pelvic_yaw_joint
   leg_l4_joint: left_leg_knee_pitch_joint
   leg_l5_joint: left_leg_ankle_pitch_joint
   leg_l6_joint: left_leg_ankle_roll_joint
-  # 右腿
+  # 右腿: hl_motion 短名 → RoboJuDo 描述名
   leg_r1_joint: right_leg_pelvic_pitch_joint
   leg_r2_joint: right_leg_pelvic_roll_joint
   leg_r3_joint: right_leg_pelvic_yaw_joint
